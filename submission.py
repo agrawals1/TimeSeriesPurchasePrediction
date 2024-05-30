@@ -343,35 +343,47 @@ def pad_sequences(sequences, maxlen):
             padded[i, -len(seq):] = np.array(seq)
     return padded
 
-# Separate the indices for class 0 and class 1
-class_0_indices = np.where(user_agg['purchase_target'] == 0)[0]
-class_1_indices = np.where(user_agg['purchase_target'] == 1)[0]
+# # Separate the indices for class 0 and class 1
+# class_0_indices = np.where(user_agg['purchase_target'] == 0)[0]
+# class_1_indices = np.where(user_agg['purchase_target'] == 1)[0]
 
-# Randomly undersample class 0 indices to match the number of class 1 indices
-undersampled_class_0_indices = np.random.choice(class_0_indices, size=len(class_1_indices), replace=False)
+# # Randomly undersample class 0 indices to match the number of class 1 indices
+# undersampled_class_0_indices = np.random.choice(class_0_indices, size=len(class_1_indices), replace=False)
 
-# Combine the undersampled class 0 indices with class 1 indices
-balanced_indices = np.concatenate([undersampled_class_0_indices, class_1_indices])
+# # Combine the undersampled class 0 indices with class 1 indices
+# balanced_indices = np.concatenate([undersampled_class_0_indices, class_1_indices])
 
-# Create balanced dataset
-user_agg = user_agg.iloc[balanced_indices].reset_index(drop=True)
+# # Create balanced dataset
+# user_agg = user_agg.iloc[balanced_indices].reset_index(drop=True)
 
 features = ['activity_encoded', 'time_since_last_activity', 'day_of_week', 'month', 'day_of_month']
 scalers = {feature: StandardScaler() for feature in features}
 
 # Fit and transform the training data
+# for feature in features:
+#     user_agg[feature] = list(scalers[feature].fit_transform(pad_sequences(user_agg[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg), seq_length))
+
+# # Apply the same scaling to the test data
+# for feature in features:
+#     user_agg_test[feature] = list(scalers[feature].transform(pad_sequences(user_agg_test[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg_test), seq_length))
+
+# # Concatenate all padded and scaled sequences for training data
+# X = np.stack([np.array(user_agg[feature].tolist()) for feature in features], axis=-1)
+
+# # Concatenate all padded and scaled sequences for test data
+# X_test = np.stack([np.array(user_agg_test[feature].tolist()) for feature in features], axis=-1)
+
+all_features_train = []
+all_features_test = []
 for feature in features:
-    user_agg[feature] = list(scalers[feature].fit_transform(pad_sequences(user_agg[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg), seq_length))
+    scaled_train = scalers[feature].fit_transform(pad_sequences(user_agg[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg), seq_length)
+    scaled_test = scalers[feature].transform(pad_sequences(user_agg_test[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg_test), seq_length)
+    all_features_train.append(scaled_train)
+    all_features_test.append(scaled_test)
 
-# Apply the same scaling to the test data
-for feature in features:
-    user_agg_test[feature] = list(scalers[feature].transform(pad_sequences(user_agg_test[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg_test), seq_length))
+X = np.stack(all_features_train, axis=-1)
+X_test = np.stack(all_features_test, axis=-1)
 
-# Concatenate all padded and scaled sequences for training data
-X = np.stack([np.array(user_agg[feature].tolist()) for feature in features], axis=-1)
-
-# Concatenate all padded and scaled sequences for test data
-X_test = np.stack([np.array(user_agg_test[feature].tolist()) for feature in features], axis=-1)
 y = user_agg['purchase_target'].values
 
 # Reshape X to 3D for LSTM: (num_samples, seq_length, input_size)
@@ -380,6 +392,12 @@ X_test = X_test.reshape((X_test.shape[0], seq_length, X_test.shape[2]))
 
 # Split balanced data into train and validation sets
 X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Calculate class weights
+class_counts = np.bincount(y_train)
+class_weights = 1. / class_counts
+positive_class_weights = class_weights[1]/class_weights[0]
+positive_class_weights = torch.tensor(positive_class_weights, dtype=torch.float32)
 
 # Convert to PyTorch tensors
 X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
@@ -424,17 +442,18 @@ output_size = 1
 num_epochs = 50
 learning_rate = 0.00005
 
+# Training loop
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 # Reinitialize model with the new input size
 model = LSTMModel(input_size, hidden_size, num_layers, output_size)
-criterion = nn.BCELoss()
+criterion = nn.BCEWithLogitsLoss(pos_weight=positive_class_weights.to(device))
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-
-
-# Training loop
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model.to(device)
+
+
+
 
 # Early stopping parameters
 patience = 3
