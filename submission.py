@@ -269,7 +269,7 @@ import torch.optim as optim
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
-
+from sklearn.preprocessing import StandardScaler
 # Load data
 data = pd.read_csv('/home/shubham/2021_6sense_DS_Takehome_Challenge/training.tsv', delimiter='\t', header=None, names=['user_id', 'date', 'activity'])
 data_test = pd.read_csv('/home/shubham/2021_6sense_DS_Takehome_Challenge/test.tsv', delimiter='\t', header=None, names=['user_id', 'date', 'activity'])
@@ -282,6 +282,21 @@ data_test['date'] = pd.to_datetime(data_test['date'], errors='coerce')
 data['activity'] = data['activity'].str.lower()
 data_test['activity'] = data_test['activity'].str.lower()
 
+# Extract temporal features
+data['day_of_week'] = data['date'].dt.dayofweek
+data['month'] = data['date'].dt.month
+data['day_of_month'] = data['date'].dt.day
+
+data_test['day_of_week'] = data_test['date'].dt.dayofweek
+data_test['month'] = data_test['date'].dt.month
+data_test['day_of_month'] = data_test['date'].dt.day
+
+# Calculate time since last activity
+data['time_since_last_activity'] = data.groupby('user_id')['date'].diff().dt.days.fillna(0)
+data_test['time_since_last_activity'] = data_test.groupby('user_id')['date'].diff().dt.days.fillna(0)
+data['time_since_last_activity'] = data['time_since_last_activity'].astype(int)
+data_test['time_since_last_activity'] = data_test['time_since_last_activity'].astype(int)
+
 # Create target variable: Purchase indicator
 data['purchase'] = np.where(data['activity'] == 'purchase', 1, 0)
 
@@ -290,24 +305,33 @@ label_encoder = LabelEncoder()
 data['activity_encoded'] = label_encoder.fit_transform(data['activity'])
 data_test['activity_encoded'] = label_encoder.transform(data_test['activity'])
 
+
 # Aggregate data by user_id
 user_agg = data.groupby('user_id').agg({
     'activity_encoded': lambda x: list(x),
+    'day_of_week': lambda x: list(x),
+    'month': lambda x: list(x),
+    'day_of_month': lambda x: list(x),
+    'time_since_last_activity': lambda x: list(x),
     'purchase': 'sum'
 }).reset_index()
 
 user_agg_test = data_test.groupby('user_id').agg({
-    'activity_encoded': lambda x: list(x)
+    'activity_encoded': lambda x: list(x),
+    'day_of_week': lambda x: list(x),
+    'month': lambda x: list(x),
+    'day_of_month': lambda x: list(x),
+    'time_since_last_activity': lambda x: list(x)
 }).reset_index()
 
 # Feature Engineering: Activity counts, recent activity, etc.
 user_agg['purchase_target'] = user_agg['purchase'].apply(lambda x: 1 if x > 0 else 0)
 
-# Calculate the 75th percentile of sequence lengths
+# Calculate the 90th percentile of sequence lengths
 seq_lengths = user_agg['activity_encoded'].apply(len)
-seq_length = int(np.percentile(seq_lengths, 75))
+seq_length = int(np.percentile(seq_lengths, 90))
 
-print(f"75th percentile sequence length: {seq_length}")
+print(f"90th percentile sequence length: {seq_length}")
 
 # Define sequence length and pad sequences
 def pad_sequences(sequences, maxlen):
@@ -318,30 +342,6 @@ def pad_sequences(sequences, maxlen):
         else:
             padded[i, -len(seq):] = np.array(seq)
     return padded
-
-# X = pad_sequences(user_agg['activity_encoded'], seq_length)
-# y = user_agg['purchase_target'].values
-
-# X_test = pad_sequences(user_agg_test['activity_encoded'], seq_length)
-
-# # Reshape X to 3D for LSTM: (num_samples, seq_length, input_size)
-# X = X.reshape((X.shape[0], seq_length, 1))
-# X_test = X_test.reshape((X_test.shape[0], seq_length, 1))
-# # Split data into train and validation sets
-# X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-
-# # Convert to PyTorch tensors
-# X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-# y_train_tensor = torch.tensor(y_train, dtype=torch.float32).unsqueeze(-1)
-# X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
-# y_val_tensor = torch.tensor(y_val, dtype=torch.float32).unsqueeze(-1)
-# X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-
-# # Create DataLoader
-# train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-# val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
-# train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-# val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
 # Separate the indices for class 0 and class 1
 class_0_indices = np.where(user_agg['purchase_target'] == 0)[0]
@@ -354,16 +354,30 @@ undersampled_class_0_indices = np.random.choice(class_0_indices, size=len(class_
 balanced_indices = np.concatenate([undersampled_class_0_indices, class_1_indices])
 
 # Create balanced dataset
-user_agg_balanced = user_agg.iloc[balanced_indices].reset_index(drop=True)
+user_agg = user_agg.iloc[balanced_indices].reset_index(drop=True)
 
-# Update X and y with balanced data
-X = pad_sequences(user_agg_balanced['activity_encoded'], seq_length)
-y = user_agg_balanced['purchase_target'].values
-X_test = pad_sequences(user_agg_test['activity_encoded'], seq_length)
+features = ['activity_encoded', 'time_since_last_activity', 'day_of_week', 'month', 'day_of_month']
+scalers = {feature: StandardScaler() for feature in features}
+
+# Fit and transform the training data
+for feature in features:
+    user_agg[feature] = list(scalers[feature].fit_transform(pad_sequences(user_agg[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg), seq_length))
+
+# Apply the same scaling to the test data
+for feature in features:
+    user_agg_test[feature] = list(scalers[feature].transform(pad_sequences(user_agg_test[feature], seq_length).reshape(-1, 1)).reshape(len(user_agg_test), seq_length))
+
+# Concatenate all padded and scaled sequences for training data
+X = np.stack([np.array(user_agg[feature].tolist()) for feature in features], axis=-1)
+
+# Concatenate all padded and scaled sequences for test data
+X_test = np.stack([np.array(user_agg_test[feature].tolist()) for feature in features], axis=-1)
+y = user_agg['purchase_target'].values
 
 # Reshape X to 3D for LSTM: (num_samples, seq_length, input_size)
-X = X.reshape((X.shape[0], seq_length, 1))
-X_test = X_test.reshape((X_test.shape[0], seq_length, 1))
+X = X.reshape((X.shape[0], seq_length, X.shape[2]))
+X_test = X_test.reshape((X_test.shape[0], seq_length, X_test.shape[2]))
+
 # Split balanced data into train and validation sets
 X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
@@ -373,6 +387,7 @@ y_train_tensor = torch.tensor(y_train, dtype=torch.float32).unsqueeze(-1)
 X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
 y_val_tensor = torch.tensor(y_val, dtype=torch.float32).unsqueeze(-1)
 X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+
 # Create DataLoader
 train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
 val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
@@ -381,7 +396,10 @@ val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
 
 
-# Define LSTM model
+# Update input size
+input_size = X.shape[2]  # Updated input size based on concatenated features
+
+# Define LSTM model with the updated input size
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size):
         super(LSTMModel, self).__init__()
@@ -400,25 +418,27 @@ class LSTMModel(nn.Module):
         return out
 
 # Hyperparameters
-input_size = 1  # As we have only one feature (activity_encoded) per time step
 hidden_size = 64
 num_layers = 2
 output_size = 1
 num_epochs = 50
-learning_rate = 0.00001
+learning_rate = 0.00005
 
-# Model, loss function, optimizer
+
+# Reinitialize model with the new input size
 model = LSTMModel(input_size, hidden_size, num_layers, output_size)
 criterion = nn.BCELoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+
 
 # Training loop
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model.to(device)
 
 # Early stopping parameters
-patience = 3  # Number of epochs with no improvement after which training will be stopped
-min_delta = 0.001  # Minimum change in the monitored quantity to qualify as an improvement
+patience = 3
+min_delta = 0.001
 best_val_loss = float('inf')
 epochs_no_improve = 0
 
@@ -478,6 +498,7 @@ for epoch in range(num_epochs):
     if epochs_no_improve >= patience:
         print(f'Early stopping triggered after {epoch + 1} epochs')
         break
+
 
 
 
